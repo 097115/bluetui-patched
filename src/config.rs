@@ -53,6 +53,9 @@ pub struct PairedDevice {
 
     #[serde(default = "default_set_new_name")]
     pub rename: char,
+
+    #[serde(default = "default_toggle_adapter_power")]
+    pub toggle_power: char,
 }
 
 impl Default for PairedDevice {
@@ -62,6 +65,7 @@ impl Default for PairedDevice {
             toggle_connect: ' ',
             toggle_trust: 't',
             rename: 'e',
+            toggle_power: 'o',
         }
     }
 }
