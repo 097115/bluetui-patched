@@ -28,6 +28,9 @@ pub struct Adapter {
 
     #[serde(default = "default_toggle_adapter_discovery")]
     pub toggle_discovery: char,
+
+    #[serde(default = "default_toggle_device_connection")]
+    pub toggle_connect: char,
 }
 
 impl Default for Adapter {
@@ -36,6 +39,7 @@ impl Default for Adapter {
             toggle_pairing: 'p',
             toggle_power: 'o',
             toggle_discovery: 'd',
+            toggle_connect: ' ',
         }
     }
 }
