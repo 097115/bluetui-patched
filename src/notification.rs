@@ -7,11 +7,11 @@ use ratatui::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{app::AppResult, event::Event};
+use crate::{app::AppResult, event::Event, string_ref::StringRef};
 
 #[derive(Debug, Clone)]
 pub struct Notification {
-    pub message: String,
+    pub message: StringRef,
     pub level: NotificationLevel,
     pub ttl: u16,
 }
@@ -24,7 +24,7 @@ pub enum NotificationLevel {
 }
 
 impl Notification {
-    pub fn render(&self, index: usize, frame: &mut Frame) {
+    pub fn render(&self, index: usize, frame: &mut Frame, area: Rect) {
         let (color, title) = match self.level {
             NotificationLevel::Info => (Color::Green, "Info"),
             NotificationLevel::Warning => (Color::Yellow, "Warning"),
@@ -51,25 +51,20 @@ impl Notification {
                     .border_style(Style::default().fg(color)),
             );
 
-        let area = notification_rect(
-            index as u16,
-            notification_height,
-            notification_width,
-            frame.area(),
-        );
+        let area = notification_rect(index as u16, notification_height, notification_width, area);
 
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
     }
     pub fn send(
-        message: String,
+        message: StringRef,
         level: NotificationLevel,
         sender: UnboundedSender<Event>,
     ) -> AppResult<()> {
         let notif = Notification {
             message,
             level,
-            ttl: 1,
+            ttl: 2,
         };
 
         sender.send(Event::Notification(notif))?;

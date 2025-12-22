@@ -1,11 +1,18 @@
+use crate::{
+    agent::{
+        display_passkey, display_pin_code, request_confirmation, request_passkey, request_pin_code,
+    },
+    event::Event,
+    help::Help,
+};
 use bluer::{
-    Session,
+    Address, Session,
     agent::{Agent, AgentHandle},
 };
 use futures::FutureExt;
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Margin},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{
@@ -13,37 +20,35 @@ use ratatui::{
         ScrollbarOrientation, ScrollbarState, Table, TableState,
     },
 };
+use tokio::sync::mpsc::UnboundedSender;
 use tui_input::Input;
 
 use crate::{
-    bluetooth::{Controller, request_confirmation},
-    config::Config,
-    confirmation::PairingConfirmation,
-    help::Help,
+    agent::AuthAgent,
+    bluetooth::Controller,
+    config::{Config, Width},
+    favorite::{read_favorite_devices_from_disk, save_favorite_devices_to_disk},
     notification::Notification,
+    requests::Requests,
     spinner::Spinner,
 };
-use std::{
-    error,
-    sync::{Arc, atomic::Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 
-pub type AppResult<T> = std::result::Result<T, Box<dyn error::Error>>;
+pub type AppResult<T> = anyhow::Result<T>;
+
+const STAR_SYMBOL: &str = "★";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FocusedBlock {
     Adapter,
     PairedDevices,
     NewDevices,
-    Help,
-    PassKeyConfirmation,
     SetDeviceAliasBox,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ColorMode {
-    Dark,
-    Light,
+    RequestConfirmation,
+    EnterPinCode,
+    EnterPasskey,
+    DisplayPinCode,
+    DisplayPasskey,
 }
 
 #[derive(Debug)]
@@ -51,53 +56,56 @@ pub struct App {
     pub running: bool,
     pub session: Arc<Session>,
     pub agent: AgentHandle,
-    pub help: Help,
     pub spinner: Spinner,
     pub notifications: Vec<Notification>,
     pub controllers: Vec<Controller>,
     pub controller_state: TableState,
     pub paired_devices_state: TableState,
+    pub favorite_devices: Vec<Address>,
     pub new_devices_state: TableState,
     pub focused_block: FocusedBlock,
-    pub pairing_confirmation: PairingConfirmation,
-    pub color_mode: ColorMode,
     pub new_alias: Input,
+    pub config: Arc<Config>,
+    pub requests: Requests,
+    pub auth_agent: AuthAgent,
 }
 
 impl App {
-    pub async fn new(config: Arc<Config>) -> AppResult<Self> {
-        let color_mode = match terminal_light::luma() {
-            Ok(luma) if luma > 0.6 => ColorMode::Light,
-            Ok(_) => ColorMode::Dark,
-            Err(_) => ColorMode::Dark,
-        };
-
+    pub async fn new(config: Arc<Config>, sender: UnboundedSender<Event>) -> AppResult<Self> {
         let session = Arc::new(bluer::Session::new().await?);
 
-        let pairing_confirmation = PairingConfirmation::new();
-
-        let user_confirmation_receiver = pairing_confirmation.user_confirmation_receiver.clone();
-
-        let confirmation_message_sender = pairing_confirmation.confirmation_message_sender.clone();
-
-        let confirmation_display = pairing_confirmation.display.clone();
+        let auth_agent = AuthAgent::new(sender.clone());
 
         let agent = Agent {
             request_default: false,
-            request_confirmation: Some(Box::new(move |req| {
-                request_confirmation(
-                    req,
-                    confirmation_display.clone(),
-                    user_confirmation_receiver.clone(),
-                    confirmation_message_sender.clone(),
-                )
-                .boxed()
+            request_confirmation: Some(Box::new({
+                let auth_agent = auth_agent.clone();
+                move |request| request_confirmation(request, auth_agent.clone()).boxed()
+            })),
+            request_pin_code: Some(Box::new({
+                let auth_agent = auth_agent.clone();
+                move |request| request_pin_code(request, auth_agent.clone()).boxed()
+            })),
+            request_passkey: Some(Box::new({
+                let auth_agent = auth_agent.clone();
+                move |request| request_passkey(request, auth_agent.clone()).boxed()
+            })),
+            display_pin_code: Some(Box::new({
+                let auth_agent = auth_agent.clone();
+                move |request| display_pin_code(request, auth_agent.clone()).boxed()
+            })),
+            display_passkey: Some(Box::new({
+                let auth_agent = auth_agent.clone();
+                move |request| display_passkey(request, auth_agent.clone()).boxed()
             })),
             ..Default::default()
         };
 
+        let favorite_devices = read_favorite_devices_from_disk().await.unwrap_or_default();
+
         let handle = session.register_agent(agent).await?;
-        let controllers: Vec<Controller> = Controller::get_all(session.clone()).await?;
+        let controllers: Vec<Controller> =
+            Controller::get_all(session.clone(), &favorite_devices).await?;
 
         let mut controller_state = TableState::default();
         if controllers.is_empty() {
@@ -110,17 +118,18 @@ impl App {
             running: true,
             session,
             agent: handle,
-            help: Help::new(config),
             spinner: Spinner::default(),
             notifications: Vec::new(),
             controllers,
             controller_state,
             paired_devices_state: TableState::default(),
+            favorite_devices,
             new_devices_state: TableState::default(),
             focused_block: FocusedBlock::PairedDevices,
-            pairing_confirmation,
-            color_mode,
             new_alias: Input::default(),
+            config,
+            requests: Requests::default(),
+            auth_agent,
         })
     }
 
@@ -141,28 +150,44 @@ impl App {
         }
     }
 
-    pub fn render_set_alias(&mut self, frame: &mut Frame) {
-        let area = Layout::default()
+    pub fn area(&self, frame: &Frame) -> Rect {
+        match self.config.width {
+            Width::Size(v) => {
+                if v < frame.area().width {
+                    let area = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Length(v), Constraint::Fill(1)])
+                        .split(frame.area());
+
+                    area[0]
+                } else {
+                    frame.area()
+                }
+            }
+            _ => frame.area(),
+        }
+    }
+
+    pub fn render_set_alias(&mut self, frame: &mut Frame, area: Rect) {
+        let block = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Fill(1),
                 Constraint::Length(6),
                 Constraint::Fill(1),
             ])
-            .split(frame.area());
+            .split(area);
 
-        let area = Layout::default()
+        let block = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Fill(1),
-                Constraint::Min(80),
+                Constraint::Max(70),
                 Constraint::Fill(1),
             ])
-            .split(area[1]);
+            .split(block[1])[1];
 
-        let area = area[1];
-
-        let (text_area, alias_area) = {
+        let (text_block, alias_block) = {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(
@@ -174,7 +199,7 @@ impl App {
                     ]
                     .as_ref(),
                 )
-                .split(area);
+                .split(block);
 
             let area1 = Layout::default()
                 .direction(Direction::Horizontal)
@@ -203,14 +228,14 @@ impl App {
             (area1[1], area2[1])
         };
 
-        frame.render_widget(Clear, area);
+        frame.render_widget(Clear, block);
         frame.render_widget(
             Block::new()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Thick)
                 .style(Style::default().green())
                 .border_style(Style::default().fg(Color::Green)),
-            area,
+            block,
         );
 
         if let Some(selected_controller) = self.controller_state.selected() {
@@ -240,8 +265,8 @@ impl App {
                             .padding(Padding::horizontal(2)),
                     );
 
-                frame.render_widget(msg, text_area);
-                frame.render_widget(alias, alias_area);
+                frame.render_widget(msg, text_block);
+                frame.render_widget(alias, alias_block);
             }
         }
     }
@@ -250,14 +275,17 @@ impl App {
         if let Some(selected_controller_index) = self.controller_state.selected() {
             let selected_controller = &self.controllers[selected_controller_index];
             // Layout
-            let render_new_devices = !selected_controller.new_devices.is_empty()
-                | selected_controller.is_scanning.load(Ordering::Relaxed);
+            let render_new_devices = selected_controller.is_scanning.load(Ordering::Relaxed);
 
-            let adapter_block_height = self.controllers.len() as u16 + 6;
+            if !render_new_devices && self.focused_block == FocusedBlock::NewDevices {
+                self.focused_block = FocusedBlock::PairedDevices;
+            }
+
+            let adapter_block_height = self.controllers.len() as u16 + 4;
 
             let paired_devices_block_height = selected_controller.paired_devices.len() as u16 + 4;
 
-            let (paired_devices_block, new_devices_block, controller_block) = {
+            let (paired_devices_block, new_devices_block, controller_block, help_block) = {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints(if render_new_devices {
@@ -265,17 +293,19 @@ impl App {
                             Constraint::Length(paired_devices_block_height),
                             Constraint::Fill(1),
                             Constraint::Length(adapter_block_height),
+                            Constraint::Length(2),
                         ]
                     } else {
                         [
                             Constraint::Fill(1),
                             Constraint::Length(0),
                             Constraint::Length(adapter_block_height),
+                            Constraint::Length(2),
                         ]
                     })
                     .margin(1)
-                    .split(frame.area());
-                (chunks[0], chunks[1], chunks[2])
+                    .split(self.area(frame));
+                (chunks[0], chunks[1], chunks[2], chunks[3])
             };
 
             //Adapters
@@ -302,9 +332,9 @@ impl App {
             let widths = [
                 Constraint::Length(10),
                 Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Length(14),
+                Constraint::Length(5),
+                Constraint::Length(8),
+                Constraint::Length(12),
             ];
 
             let rows_len = rows.len();
@@ -323,28 +353,12 @@ impl App {
                         .bottom_margin(1)
                     } else {
                         Row::new(vec![
-                            Cell::from("Name").style(match self.color_mode {
-                                ColorMode::Dark => Style::default().fg(Color::White),
-                                ColorMode::Light => Style::default().fg(Color::Black),
-                            }),
-                            Cell::from("Alias").style(match self.color_mode {
-                                ColorMode::Dark => Style::default().fg(Color::White),
-                                ColorMode::Light => Style::default().fg(Color::Black),
-                            }),
-                            Cell::from("Power").style(match self.color_mode {
-                                ColorMode::Dark => Style::default().fg(Color::White),
-                                ColorMode::Light => Style::default().fg(Color::Black),
-                            }),
-                            Cell::from("Pairable").style(match self.color_mode {
-                                ColorMode::Dark => Style::default().fg(Color::White),
-                                ColorMode::Light => Style::default().fg(Color::Black),
-                            }),
-                            Cell::from("Discoverable").style(match self.color_mode {
-                                ColorMode::Dark => Style::default().fg(Color::White),
-                                ColorMode::Light => Style::default().fg(Color::Black),
-                            }),
+                            Cell::from("Name"),
+                            Cell::from("Alias"),
+                            Cell::from("Power"),
+                            Cell::from("Pairable"),
+                            Cell::from("Discoverable"),
                         ])
-                        .style(Style::new().bold())
                         .bottom_margin(1)
                     }
                 })
@@ -374,11 +388,7 @@ impl App {
                             }
                         }),
                 )
-                .style(match self.color_mode {
-                    ColorMode::Dark => Style::default().fg(Color::White),
-                    ColorMode::Light => Style::default().fg(Color::Black),
-                })
-                .highlight_symbol("  ")
+                .flex(self.config.layout)
                 .row_highlight_style(if self.focused_block == FocusedBlock::Adapter {
                     Style::default().bg(Color::DarkGray).fg(Color::White)
                 } else {
@@ -413,13 +423,12 @@ impl App {
                 .iter()
                 .map(|d| {
                     Row::new(vec![
-                        {
-                            if let Some(icon) = &d.icon {
-                                format!("{} {}", icon, &d.alias)
-                            } else {
-                                d.alias.to_owned()
-                            }
+                        if d.is_favorite {
+                            STAR_SYMBOL.to_string()
+                        } else {
+                            "".to_string()
                         },
+                        format!("{} {}", &d.icon, &d.alias),
                         d.is_trusted.to_string(),
                         d.is_connected.to_string(),
                         {
@@ -478,9 +487,10 @@ impl App {
                 .any(|device| device.battery_percentage.is_some());
 
             let mut widths = vec![
+                Constraint::Length(1),
                 Constraint::Max(25),
-                Constraint::Length(10),
-                Constraint::Length(10),
+                Constraint::Length(7),
+                Constraint::Length(9),
             ];
 
             if show_battery_column {
@@ -492,6 +502,7 @@ impl App {
                     if show_battery_column {
                         if self.focused_block == FocusedBlock::PairedDevices {
                             Row::new(vec![
+                                Cell::from("").style(Style::default().fg(Color::Yellow)),
                                 Cell::from("Name").style(Style::default().fg(Color::Yellow)),
                                 Cell::from("Trusted").style(Style::default().fg(Color::Yellow)),
                                 Cell::from("Connected").style(Style::default().fg(Color::Yellow)),
@@ -501,28 +512,17 @@ impl App {
                             .bottom_margin(1)
                         } else {
                             Row::new(vec![
-                                Cell::from("Name").style(match self.color_mode {
-                                    ColorMode::Dark => Style::default().fg(Color::White),
-                                    ColorMode::Light => Style::default().fg(Color::Black),
-                                }),
-                                Cell::from("Trusted").style(match self.color_mode {
-                                    ColorMode::Dark => Style::default().fg(Color::White),
-                                    ColorMode::Light => Style::default().fg(Color::Black),
-                                }),
-                                Cell::from("Connected").style(match self.color_mode {
-                                    ColorMode::Dark => Style::default().fg(Color::White),
-                                    ColorMode::Light => Style::default().fg(Color::Black),
-                                }),
-                                Cell::from("Battery").style(match self.color_mode {
-                                    ColorMode::Dark => Style::default().fg(Color::White),
-                                    ColorMode::Light => Style::default().fg(Color::Black),
-                                }),
+                                Cell::from(""),
+                                Cell::from("Name"),
+                                Cell::from("Trusted"),
+                                Cell::from("Connected"),
+                                Cell::from("Battery"),
                             ])
-                            .style(Style::new().bold())
                             .bottom_margin(1)
                         }
                     } else if self.focused_block == FocusedBlock::PairedDevices {
                         Row::new(vec![
+                            Cell::from("").style(Style::default().fg(Color::Yellow)),
                             Cell::from("Name").style(Style::default().fg(Color::Yellow)),
                             Cell::from("Trusted").style(Style::default().fg(Color::Yellow)),
                             Cell::from("Connected").style(Style::default().fg(Color::Yellow)),
@@ -531,18 +531,10 @@ impl App {
                         .bottom_margin(1)
                     } else {
                         Row::new(vec![
-                            Cell::from("Name").style(match self.color_mode {
-                                ColorMode::Dark => Style::default().fg(Color::White),
-                                ColorMode::Light => Style::default().fg(Color::Black),
-                            }),
-                            Cell::from("Trusted").style(match self.color_mode {
-                                ColorMode::Dark => Style::default().fg(Color::White),
-                                ColorMode::Light => Style::default().fg(Color::Black),
-                            }),
-                            Cell::from("Connected").style(match self.color_mode {
-                                ColorMode::Dark => Style::default().fg(Color::White),
-                                ColorMode::Light => Style::default().fg(Color::Black),
-                            }),
+                            Cell::from(""),
+                            Cell::from("Name"),
+                            Cell::from("Trusted"),
+                            Cell::from("Connected"),
                         ])
                         .style(Style::new().bold())
                         .bottom_margin(1)
@@ -574,11 +566,7 @@ impl App {
                             }
                         }),
                 )
-                .style(match self.color_mode {
-                    ColorMode::Dark => Style::default().fg(Color::White),
-                    ColorMode::Light => Style::default().fg(Color::Black),
-                })
-                .highlight_symbol("  ")
+                .flex(self.config.layout)
                 .row_highlight_style(if self.focused_block == FocusedBlock::PairedDevices {
                     Style::default().bg(Color::DarkGray).fg(Color::White)
                 } else {
@@ -614,45 +602,36 @@ impl App {
                     .new_devices
                     .iter()
                     .map(|d| {
-                        Row::new(vec![d.addr.to_string(), {
-                            if let Some(icon) = &d.icon {
-                                format!("{} {}", icon, &d.alias)
-                            } else {
-                                d.alias.to_owned()
-                            }
-                        }])
+                        Row::new(vec![
+                            d.addr.to_string(),
+                            format!("{} {}", &d.icon, &d.alias),
+                        ])
                     })
                     .collect();
                 let rows_len = rows.len();
 
-                let widths = [Constraint::Length(25), Constraint::Length(20)];
+                let widths = [Constraint::Length(20), Constraint::Length(20)];
 
                 let new_devices_table = Table::new(rows, widths)
                     .header({
                         if self.focused_block == FocusedBlock::NewDevices {
                             Row::new(vec![
-                                Cell::from("Address").style(Style::default().fg(Color::Yellow)),
-                                Cell::from("Name").style(Style::default().fg(Color::Yellow)),
+                                Cell::from(Line::from("Address").fg(Color::Yellow).centered()),
+                                Cell::from(Line::from("Name").fg(Color::Yellow).centered()),
                             ])
                             .style(Style::new().bold())
                             .bottom_margin(1)
                         } else {
                             Row::new(vec![
-                                Cell::from("Address").style(match self.color_mode {
-                                    ColorMode::Dark => Style::default().fg(Color::White),
-                                    ColorMode::Light => Style::default().fg(Color::Black),
-                                }),
-                                Cell::from("Name").style(match self.color_mode {
-                                    ColorMode::Dark => Style::default().fg(Color::White),
-                                    ColorMode::Light => Style::default().fg(Color::Black),
-                                }),
+                                Cell::from(Line::from("Address").centered()),
+                                Cell::from(Line::from("Name").centered()),
                             ])
-                            .style(Style::new().bold())
                             .bottom_margin(1)
                         }
                     })
                     .block(
                         Block::default()
+                            .padding(Padding::horizontal(1))
                             .title({
                                 if selected_controller.is_scanning.load(Ordering::Relaxed) {
                                     format!(" Scanning {} ", self.spinner.draw())
@@ -683,11 +662,7 @@ impl App {
                                 }
                             }),
                     )
-                    .style(match self.color_mode {
-                        ColorMode::Dark => Style::default().fg(Color::White),
-                        ColorMode::Light => Style::default().fg(Color::Black),
-                    })
-                    .highlight_symbol("  ")
+                    .flex(self.config.layout)
                     .row_highlight_style(if self.focused_block == FocusedBlock::NewDevices {
                         Style::default().bg(Color::DarkGray).fg(Color::White)
                     } else {
@@ -718,11 +693,49 @@ impl App {
                 }
             }
 
+            //
+            let area = self.area(frame);
+
+            // Help
+            Help::render(
+                frame,
+                area,
+                self.focused_block,
+                help_block,
+                self.config.clone(),
+            );
+
             // Pairing confirmation
 
-            if self.pairing_confirmation.display.load(Ordering::Relaxed) {
-                self.focused_block = FocusedBlock::PassKeyConfirmation;
-                self.pairing_confirmation.render(frame);
+            // Set alias popup
+            if self.focused_block == FocusedBlock::SetDeviceAliasBox {
+                self.render_set_alias(frame, area);
+            }
+
+            // Request Confirmation
+            if let Some(req) = &self.requests.confirmation {
+                req.render(frame, area);
+            }
+
+            // Request to enter pin code
+
+            if let Some(req) = &self.requests.enter_pin_code {
+                req.render(frame, area);
+            }
+
+            // Request passkey
+            if let Some(req) = &self.requests.enter_passkey {
+                req.render(frame, area);
+            }
+
+            // Display Pin Code
+            if let Some(req) = &self.requests.display_pin_code {
+                req.render(frame, area);
+            }
+
+            // Display Passkey
+            if let Some(req) = &self.requests.display_passkey {
+                req.render(frame, area);
             }
         }
     }
@@ -739,38 +752,30 @@ impl App {
     }
 
     pub async fn refresh(&mut self) -> AppResult<()> {
-        if !self.pairing_confirmation.display.load(Ordering::Relaxed)
-            & self.pairing_confirmation.message.is_some()
-        {
-            self.pairing_confirmation.message = None;
-        }
+        let refreshed_controllers =
+            Controller::get_all(self.session.clone(), &self.favorite_devices).await?;
 
-        let refreshed_controllers = Controller::get_all(self.session.clone()).await?;
+        // Remove unplugged adapters in a single pass
+        let mut adapter_removed = false;
+        self.controllers.retain(|controller| {
+            let should_retain = refreshed_controllers
+                .iter()
+                .any(|c| c.name == controller.name);
 
-        let names = {
-            let mut names: Vec<String> = Vec::new();
-
-            for controller in self.controllers.iter() {
-                if !refreshed_controllers
-                    .iter()
-                    .any(|c| c.name == controller.name)
-                {
-                    names.push(controller.name.clone());
-                }
+            if !should_retain {
+                adapter_removed = true;
             }
 
-            names
-        };
+            should_retain
+        });
 
-        // Remove unplugged adapters
-        for name in names {
-            self.controllers.retain(|c| c.name != name);
-
+        // Update selection after removal
+        if adapter_removed {
             if !self.controllers.is_empty() {
                 let i = match self.controller_state.selected() {
                     Some(i) => {
                         if i > 0 {
-                            i - 1
+                            (i - 1).min(self.controllers.len() - 1)
                         } else {
                             0
                         }
@@ -789,6 +794,10 @@ impl App {
                 .iter_mut()
                 .find(|c| c.name == refreshed_controller.name)
             {
+                // Prepare to check if the paired devices list is shrinking
+                let old_paired_count = controller.paired_devices.len();
+                let new_paired_count = refreshed_controller.paired_devices.len();
+
                 // Update existing adapters
                 controller.alias = refreshed_controller.alias;
                 controller.is_powered = refreshed_controller.is_powered;
@@ -796,6 +805,19 @@ impl App {
                 controller.is_discoverable = refreshed_controller.is_discoverable;
                 controller.paired_devices = refreshed_controller.paired_devices;
                 controller.new_devices = refreshed_controller.new_devices;
+
+                // Update selection if paired devices list shrank
+                if new_paired_count < old_paired_count
+                    && let Some(selected_index) = self.paired_devices_state.selected()
+                {
+                    // Check if selected index is now out of bounds and update the index if required
+                    if new_paired_count == 0 {
+                        self.paired_devices_state.select(None);
+                    } else if selected_index >= new_paired_count && new_paired_count > 0 {
+                        self.paired_devices_state
+                            .select(Some(new_paired_count.saturating_sub(1)));
+                    }
+                }
             } else {
                 // Add new detected adapters
                 self.controllers.push(refreshed_controller);
@@ -806,6 +828,8 @@ impl App {
     }
 
     pub fn quit(&mut self) {
+        // TODO: use env_logger error!()
+        let _ = save_favorite_devices_to_disk(&self.favorite_devices);
         self.running = false;
     }
 }

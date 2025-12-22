@@ -1,23 +1,16 @@
+pub mod agent;
 pub mod app;
-
-pub mod event;
-
-pub mod ui;
-
-pub mod tui;
-
-pub mod handler;
-
 pub mod bluetooth;
-
-pub mod notification;
-
-pub mod spinner;
-
-pub mod help;
-
+pub mod cli;
 pub mod config;
-
+pub mod event;
+pub mod favorite;
+pub mod handler;
+mod help;
+pub mod notification;
+pub mod requests;
 pub mod rfkill;
-
-pub mod confirmation;
+pub mod spinner;
+pub mod string_ref;
+pub mod tui;
+pub mod ui;

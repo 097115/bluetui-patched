@@ -1,3 +1,29 @@
+## v0.8.0 - 2025-11-13
+
+- Implement the rest of the auth methods
+- Add default icon to the devices that do not have one
+- Layout adjustements
+- Connect and trust automatically the new pair devices
+
+## v0.7.2 - 2025-11-03
+
+- Align icons
+- Ability to customize the layout
+- Ability to set the width for the window
+
+## v0.7.1 - 2025-10-22
+
+- Make helper banner responsive
+- Fix display issue on light theme terminal
+- Update the layout to center the content
+
+## v0.7 - 2025-10-21
+
+- Use help banner instead of the popup
+- Fix crash when rfkill dir is not present
+- Add h/l nav controls
+- Add BackTab key handler
+
 ## v0.6 - 2024-12-21
 
 ### Updated

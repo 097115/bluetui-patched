@@ -1,7 +1,7 @@
 <div align="center">
   <img height="125" src="assets/bluetui-logo-anim.svg"/>
   <h2> TUI for managing bluetooth on Linux </h2>
-  <img src="https://github.com/user-attachments/assets/13498e90-b2d0-43c8-9dd7-8a9de2734f64"/>
+  <img src="https://github.com/user-attachments/assets/f937535d-5675-4427-b347-8086c8830e23"/>
 </div>
 
 ## 💡 Prerequisites
@@ -36,6 +36,7 @@ pacman -S bluetui
 ### 🐧 Gentoo
 
 You can install `bluetui` from the [lamdness Gentoo Overlay](https://gpo.zugaina.org/net-wireless/bluetui):
+
 ```sh
 sudo eselect repository enable lamdness
 sudo emaint -r lamdness sync
@@ -49,7 +50,6 @@ If you are a user of [x-cmd](https://x-cmd.com), you can run:
 ```shell
 x install bluetui
 ```
-
 
 ### ⚒️ Build from source
 
@@ -67,7 +67,9 @@ This will produce an executable file at `target/release/bluetui` that you can co
 
 ### Global
 
-`Tab`: Switch between different sections.
+`Tab` or `l`: Scroll down between different sections.
+
+`shift+Tab` or `h`: Scroll up between different sections.
 
 `j` or `Down` : Scroll down.
 
@@ -75,11 +77,7 @@ This will produce an executable file at `target/release/bluetui` that you can co
 
 `s`: Start/Stop scanning.
 
-`?`: Show help.
-
-`esc`: Dismiss the help pop-up.
-
-`ctrl+c` or `q`: Quit the app.
+`ctrl+c` or `q`: Quit the app. (Note: `<Esc>` can also quit if `esc_quit = true` is set in config)
 
 ### Adapters
 
@@ -93,22 +91,32 @@ This will produce an executable file at `target/release/bluetui` that you can co
 
 `u`: Unpair the device.
 
-`Space`: Connect/Disconnect the device.
+`Space or Enter`: Connect/Disconnect the device.
 
 `t`: Trust/Untrust the device.
+
+`f`: Favorite/Unfavorite the device.
 
 `e`: Rename the device.
 
 ### New devices
 
-`p`: Pair the device.
+`Space or Enter`: Pair the device.
 
-## Custom keybindings
+## Config
 
-Keybindings can be customized in the config file `$HOME/.config/bluetui/config.toml`
+Keybindings can be customized in the default config file location `$HOME/.config/bluetui/config.toml` or from a custom path with `-c`
 
 ```toml
+# Possible values: "Legacy", "Start", "End", "Center", "SpaceAround", "SpaceBetween"
+layout = "SpaceAround"
+
+# Window width
+# Possible values: "auto" or a positive integer
+width = "auto"
+
 toggle_scanning = "s"
+esc_quit = false  # Set to true to enable Esc key to quit the app
 
 [adapter]
 toggle_pairing = "p"
@@ -117,13 +125,20 @@ toggle_discovery = "d"
 
 [paired_device]
 unpair = "u"
-toggle_connect = " "
 toggle_trust = "t"
+toggle_favorite = "f"
 rename = "e"
-
-[new_device]
-pair = "p"
 ```
+
+## Contributing
+
+- No AI slop.
+- Only submit a pull request after having a prior issue or discussion.
+- Keep PRs small and focused.
+
+## 🎁 Note
+
+If you like `bluetui` and you are looking for a TUI to manage WiFi, checkout out [impala](https://github.com/pythops/impala)
 
 ## ⚖️ License
 

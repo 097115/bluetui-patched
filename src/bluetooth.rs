@@ -1,14 +1,8 @@
-use std::sync::{Arc, atomic::AtomicBool, mpsc::Sender};
+use std::sync::{Arc, atomic::AtomicBool};
 
-use async_channel::Receiver;
-use bluer::{
-    Adapter, Address, Session,
-    agent::{ReqError, ReqResult, RequestConfirmation},
-};
+use bluer::{Adapter, Address, Session};
 
 use bluer::Device as BTDevice;
-
-use tokio::sync::oneshot;
 
 use crate::app::AppResult;
 
@@ -29,9 +23,10 @@ pub struct Controller {
 pub struct Device {
     device: BTDevice,
     pub addr: Address,
-    pub icon: Option<String>,
+    pub icon: &'static str,
     pub alias: String,
     pub is_paired: bool,
+    pub is_favorite: bool,
     pub is_trusted: bool,
     pub is_connected: bool,
     pub battery_percentage: Option<u8>,
@@ -43,25 +38,29 @@ impl Device {
         Ok(())
     }
 
-    // https://specifications.freedesktop.org/icon-naming-spec/icon-naming-spec-latest.html
-    pub fn get_icon(name: &str) -> Option<String> {
+    // https://specifications.freedesktop.org/icon-naming/latest/
+    pub fn get_icon(name: &str) -> &'static str {
         match name {
-            "audio-card" => Some(String::from("󰓃")),
-            "audio-input-microphone" => Some(String::from("")),
-            "audio-headphones" | "audio-headset" => Some(String::from("󰋋")),
-            "battery" => Some(String::from("󰂀")),
-            "camera-photo" => Some(String::from("󰻛")),
-            "computer" => Some(String::from("")),
-            "input-keyboard" => Some(String::from("󰌌")),
-            "input-mouse" => Some(String::from("󰍽")),
-            "phone" => Some(String::from("󰏲")),
-            _ => None,
+            "audio-card" => "󰓃 ",
+            "audio-input-microphone" => " ",
+            "audio-headphones" | "audio-headset" => "󰋋 ",
+            "battery" => "󰂀 ",
+            "camera-photo" => "󰻛 ",
+            "computer" => " ",
+            "input-keyboard" => "󰌌 ",
+            "input-mouse" => "󰍽 ",
+            "input-gaming" => "󰊴 ",
+            "phone" => "󰏲 ",
+            _ => "󰾰 ",
         }
     }
 }
 
 impl Controller {
-    pub async fn get_all(session: Arc<Session>) -> AppResult<Vec<Controller>> {
+    pub async fn get_all(
+        session: Arc<Session>,
+        favorite_devices: &[Address],
+    ) -> AppResult<Vec<Controller>> {
         let mut controllers: Vec<Controller> = Vec::new();
 
         // let session = bluer::Session::new().await?;
@@ -75,7 +74,8 @@ impl Controller {
                 let is_discoverable = adapter.is_discoverable().await?;
                 let is_scanning = adapter.is_discovering().await?;
 
-                let (paired_devices, new_devices) = Controller::get_all_devices(&adapter).await?;
+                let (paired_devices, new_devices) =
+                    Controller::get_all_devices(&adapter, favorite_devices).await?;
 
                 let controller = Controller {
                     adapter: Arc::new(adapter),
@@ -96,7 +96,10 @@ impl Controller {
         Ok(controllers)
     }
 
-    pub async fn get_all_devices(adapter: &Adapter) -> AppResult<(Vec<Device>, Vec<Device>)> {
+    pub async fn get_all_devices(
+        adapter: &Adapter,
+        favorite_devices: &[Address],
+    ) -> AppResult<(Vec<Device>, Vec<Device>)> {
         let mut paired_devices: Vec<Device> = Vec::new();
         let mut new_devices: Vec<Device> = Vec::new();
         let mut devices_without_aliases: Vec<Device> = Vec::new();
@@ -110,6 +113,7 @@ impl Controller {
             let is_paired = device.is_paired().await?;
             let is_trusted = device.is_trusted().await?;
             let is_connected = device.is_connected().await?;
+            let is_favorite = favorite_devices.contains(&addr);
             let battery_percentage = device.battery_percentage().await?;
 
             let dev = Device {
@@ -120,6 +124,7 @@ impl Controller {
                 is_paired,
                 is_trusted,
                 is_connected,
+                is_favorite,
                 battery_percentage,
             };
 
@@ -135,8 +140,8 @@ impl Controller {
             }
         }
 
-        paired_devices.sort_by_key(|i| i.addr);
-        new_devices.sort_by_key(|i| i.clone().alias);
+        paired_devices.sort_by_key(|i| (!i.is_favorite, i.addr));
+        new_devices.sort_by(|a, b| a.alias.cmp(&b.alias));
         devices_without_aliases.sort_by_key(|i| i.addr);
         new_devices.extend(devices_without_aliases);
 
@@ -145,41 +150,21 @@ impl Controller {
 }
 
 fn is_mac_addr(s: &str) -> bool {
-    let s: String = s.chars().filter(|&c| c != '-').collect();
-    s.len() == 12 && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-pub async fn request_confirmation(
-    req: RequestConfirmation,
-    display_confirmation_popup: Arc<AtomicBool>,
-    rx: Receiver<bool>,
-    sender: Sender<String>,
-) -> ReqResult<()> {
-    display_confirmation_popup.store(true, std::sync::atomic::Ordering::Relaxed);
-
-    sender
-        .send(format!(
-            "Is passkey \"{:06}\" correct for device {} on {}?",
-            req.passkey, &req.device, &req.adapter
-        ))
-        .unwrap();
-
-    // request cancel
-    let (_done_tx, done_rx) = oneshot::channel::<()>();
-    tokio::spawn(async move {
-        if done_rx.await.is_err() {
-            display_confirmation_popup.store(false, std::sync::atomic::Ordering::Relaxed);
-        }
-    });
-    match rx.recv().await {
-        Ok(v) => {
-            // false: reject the confirmation
-            if !v {
-                return Err(ReqError::Rejected);
-            }
-        }
-        Err(_) => return Err(ReqError::Rejected),
+    if s.len() != 17 {
+        return false;
     }
-
-    Ok(())
+    let mut chars = s.chars();
+    for _ in 0..5 {
+        // Matches [A-Fa-f0-9][A-Fa-f0-9]-
+        if !(matches!(chars.next(), Some(c) if c.is_ascii_hexdigit())
+            && matches!(chars.next(), Some(c) if c.is_ascii_hexdigit())
+            && matches!(chars.next(), Some('-')))
+        {
+            return false;
+        }
+    }
+    // Matches [A-Fa-f0-9][A-Fa-f0-9]$
+    matches!(chars.next(), Some(c) if c.is_ascii_hexdigit())
+        && matches!(chars.next(), Some(c) if c.is_ascii_hexdigit())
+        && chars.next().is_none()
 }
