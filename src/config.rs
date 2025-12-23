@@ -125,6 +125,12 @@ pub struct PairedDevice {
 
     #[serde(default = "default_set_new_name")]
     pub rename: char,
+
+    #[serde(default = "default_toggle_adapter_power")]
+    pub toggle_power: char,
+
+    #[serde(default = "default_toggle_adapter_discovery")]
+    pub toggle_discovery: char,
 }
 
 impl Default for PairedDevice {
@@ -134,6 +140,8 @@ impl Default for PairedDevice {
             toggle_trust: 't',
             toggle_favorite: 'f',
             rename: 'e',
+            toggle_power: 'o',
+            toggle_discovery: 'd',
         }
     }
 }
