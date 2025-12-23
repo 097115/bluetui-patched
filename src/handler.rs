@@ -608,6 +608,67 @@ pub async fn handle_key_events(
                                     app.focused_block = FocusedBlock::SetDeviceAliasBox;
                                 }
 
+                                KeyCode::Char(c) if c == config.paired_device.toggle_power => {
+                                    if let Some(selected_controller) =
+                                        app.controller_state.selected()
+                                    {
+                                        let adapter = &app.controllers[selected_controller].adapter;
+                                        tokio::spawn({
+                                            let adapter = adapter.clone();
+                                            async move {
+                                                match adapter.is_powered().await {
+                                                    Ok(is_powered) => {
+                                                        if is_powered {
+                                                            match adapter.set_powered(false).await {
+                                                                Ok(_) => {
+                                                                    let _ = Notification::send(
+                                                                        "Adapter powered off"
+                                                                            .into(),
+                                                                        NotificationLevel::Info,
+                                                                        sender.clone(),
+                                                                    );
+                                                                }
+                                                                Err(e) => {
+                                                                    let _ = Notification::send(
+                                                                        e.into(),
+                                                                        NotificationLevel::Error,
+                                                                        sender.clone(),
+                                                                    );
+                                                                }
+                                                            }
+                                                        } else {
+                                                            match adapter.set_powered(true).await {
+                                                                Ok(_) => {
+                                                                    let _ = Notification::send(
+                                                                        "Adapter powered on"
+                                                                            .into(),
+                                                                        NotificationLevel::Info,
+                                                                        sender.clone(),
+                                                                    );
+                                                                }
+                                                                Err(e) => {
+                                                                    let _ = Notification::send(
+                                                                        e.into(),
+                                                                        NotificationLevel::Error,
+                                                                        sender.clone(),
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        let _ = Notification::send(
+                                                            e.into(),
+                                                            NotificationLevel::Error,
+                                                            sender.clone(),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+
                                 _ => {}
                             }
                         }
