@@ -15,6 +15,20 @@ use tui_input::backend::crossterm::EventHandler;
 async fn toggle_connect(app: &mut App, sender: UnboundedSender<Event>) {
     if let Some(selected_controller) = app.controller_state.selected() {
         let controller = &app.controllers[selected_controller];
+        if !controller.paired_devices.is_empty() {
+            let i = match app.paired_devices_state.selected() {
+                Some(i) => {
+                    if i < controller.paired_devices.len() - 1 {
+                        i + 1
+                    } else {
+                        i
+                    }
+                }
+                None => 0,
+            };
+
+            app.paired_devices_state.select(Some(i));
+        }
         if let Some(index) = app.paired_devices_state.selected() {
             let addr = controller.paired_devices[index].addr;
             match controller.adapter.device(addr) {
@@ -864,6 +878,10 @@ pub async fn handle_key_events(
                                         });
                                     }
                                 }
+
+                                // Connect / Disconnect
+                                KeyCode::Enter => toggle_connect(app, sender).await,
+                                KeyCode::Char(' ') => toggle_connect(app, sender).await,
 
                                 _ => {}
                             }
