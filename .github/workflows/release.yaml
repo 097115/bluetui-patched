@@ -27,18 +27,20 @@ jobs:
           CROSS_CONTAINER_ENGINE=podman cross build --target x86_64-unknown-linux-musl --release
           cp target/x86_64-unknown-linux-musl/release/bluetui bluetui-x86_64-linux-musl
 
-      - run: cargo clean
-
-      - name: Build for aarch64 linux gnu
-        run: |
-          CROSS_CONTAINER_ENGINE=podman cross build --target aarch64-unknown-linux-musl --release
-          cp target/aarch64-unknown-linux-musl/release/bluetui bluetui-aarch64-linux-musl
-
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           body: |
             [Release.md](${{ github.server_url }}/${{ github.repository }}/blob/master/Release.md)
           files: "bluetui*"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clean
+        uses: jay2610/delete-older-releases@1.0.0
+        with:
+          keep_latest: 3
+          delete_type: 'release'
+          target_branch: 'master'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
